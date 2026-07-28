@@ -10,10 +10,7 @@ def generate_preference_array(num_rows, num_agents):
     P = np.empty((num_rows, num_agents), dtype=np.float64)
 
     for row_idx in range(num_rows):
-        permutation = np.random.permutation(num_agents)
-
-        for agent_idx in range(num_agents):
-            P[row_idx, agent_idx] = num_agents - 1 - permutation[agent_idx]+1
+        P[row_idx] = np.random.permutation(num_agents) + 1
 
     return P
 
@@ -31,8 +28,7 @@ class Data(object):
         self.corr = corr
 
     def add_unacceptable_options(self, P, truncation_probability):
-        P_trunc = self._add_unacceptable_options(P, truncation_probability)
-        return P_trunc / self.num_agents
+        return self._add_unacceptable_options(P, truncation_probability) / self.num_agents
 
     @staticmethod
     @jit(nopython=True)
@@ -67,52 +63,43 @@ class Data(object):
         M = self.generate_complete_ranking(truncation=truncation)
         num_misreports = M.shape[-2]
 
-        P_mis = np.tile(P[:, np.newaxis, :, :], [1, num_misreports, 1,1])
-        Q_mis = np.tile(Q[:, np.newaxis, :, :], [1, num_misreports, 1,1])
+        P_mis = np.tile(P[:, np.newaxis, :, :], [1, num_misreports, 1, 1])
+        Q_mis = np.tile(Q[:, np.newaxis, :, :], [1, num_misreports, 1, 1])
 
         if is_P:
             P_mis[:, :, agent_idx, :] = M
         else:
-            Q_mis[:, :, agent_idx, :] = M
+            Q_mis[:, :, :, agent_idx] = M
 
         return P_mis, Q_mis
 
+    def _generate_preferences(self, num_rows):
+        P = generate_preference_array(num_rows, self.num_agents)
+        return self.add_unacceptable_options(P, truncation_probability=self.prob)
+
+    def _blend_with_market(self, P, batch_size):
+        market = self._generate_preferences(batch_size).reshape(batch_size, 1, self.num_agents)
+        mask = np.random.random((batch_size, self.num_agents, 1)) < self.corr
+        return np.where(mask, market, P)
+
     def generate_batch(self, batch_size):
         N = batch_size * self.num_agents
+        shape = (batch_size, self.num_agents, self.num_agents)
 
-        P = generate_preference_array(N, self.num_agents)
-        Q = generate_preference_array(N, self.num_agents)
-
-        P = self.add_unacceptable_options(P, truncation_probability=self.prob)
-        Q = self.add_unacceptable_options(Q, truncation_probability=self.prob)
-
-        P = P.reshape(batch_size, self.num_agents, self.num_agents)
-        Q = Q.reshape(batch_size, self.num_agents, self.num_agents)
+        P = self._generate_preferences(N).reshape(shape)
+        Q = self._generate_preferences(N).reshape(shape)
 
         if self.corr > 0:
-            P_market = generate_preference_array(batch_size, self.num_agents)
-            Q_market = generate_preference_array(batch_size, self.num_agents)
+            P = self._blend_with_market(P, batch_size)
+            Q = self._blend_with_market(Q, batch_size)
 
-            P_market = self.add_unacceptable_options(P_market, truncation_probability=self.prob)
-            Q_market = self.add_unacceptable_options(Q_market, truncation_probability=self.prob)
-
-            P_market = P_market.reshape(batch_size, 1, self.num_agents)
-            Q_market = Q_market.reshape(batch_size, 1, self.num_agents)
-
-            P_corr = np.random.random((batch_size, self.num_agents, 1)) < self.corr
-            Q_corr = np.random.random((batch_size, self.num_agents, 1)) < self.corr
-
-            P = np.where(P_corr, P_market, P)
-            Q = np.where(Q_corr, Q_market, Q)
-
-        Q = np.transpose(Q, (0, 2, 1))
-        return P, Q
+        return P, Q.transpose(0, 2, 1)
 
 
 
 
 if __name__ == "__main__":
-    data = Data(num_agents=3, prob=0.5, corr=0.5)
+    data = Data(num_agents=10, prob=0.5, corr=0.5)
     P, Q = data.generate_batch(batch_size=1)
 
     print("P shape:", P.shape)
