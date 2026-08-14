@@ -177,12 +177,56 @@ def numba_TTC(P, Q, menPreferences, womenPreferences):
 
     return R
 
+@jit(nopython=True)
+def numba_BSC(P, Q, menPreferences, womenPreferences):
+    num_instances, num_agents = P.shape[0], P.shape[1]
+    R = np.zeros(P.shape)
+
+    for inst in range(num_instances):
+        manSpouse, womanSpouse = [-1] * num_agents, [-1] * num_agents
+
+        for t in range(num_agents):
+
+            currWomanSpouse = [-1] * num_agents
+
+            for he in range(num_agents):
+
+                if manSpouse[he] != -1:
+                    continue
+
+                she = menPreferences[inst, he, t]
+
+                if womanSpouse[she] != -1:
+                    continue
+                if P[inst, he, she] < 0:
+                    manSpouse[he] = num_agents
+                    continue
+
+                if currWomanSpouse[she] == -1:
+                    if Q[inst,he,she] > 0:
+                        R[inst, he, she] = 1
+                        currWomanSpouse[she] = he
+
+                else:
+                    if Q[inst, he, she] > Q[inst, currWomanSpouse[she], she]:
+                        R[inst, he, she] = 1
+                        R[inst, currWomanSpouse[she], she] = 0
+                        currWomanSpouse[she] = he
+
+            for she in range(num_agents):
+                if currWomanSpouse[she] != -1:
+                    womanSpouse[she] = currWomanSpouse[she]
+                    manSpouse[currWomanSpouse[she]] = she
+    return R
+
+
 
 if __name__ == "__main__":
     P, Q, menPreferences, womenPreferences, order = example_market()
     R = numba_DA(P, Q, menPreferences, womenPreferences)
     R2 = numba_SD(P, Q, menPreferences, womenPreferences, order)
     R3 = numba_TTC(P, Q, menPreferences, womenPreferences)
+    R4 = numba_BSC(P, Q, menPreferences, womenPreferences)
     expected_R = np.array([[
         [0, 0, 1],
         [0, 1, 0],
@@ -199,6 +243,7 @@ if __name__ == "__main__":
     print(R2.astype(int))
     print("R3(TTC):")
     print(R3.astype(int))
+    print(f"R4(BSC):\n{R4.astype(int)}")
     print("expected R:")
     print(expected_R)
     print("matches expected:", np.array_equal(R, expected_R))
