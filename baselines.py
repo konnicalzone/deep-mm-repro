@@ -1,25 +1,6 @@
-import itertools
 import numpy as np
 from numba import jit
-
-def example_market():
-    P = np.array([[
-        [1/3, 1, 2/3],
-        [2/3, 1, 1/3],
-        [1, 1/3, 2/3],
-    ]])
-
-    Q = np.array([[
-        [1, 1/3, 2/3],
-        [2/3, 1, 1/3],
-        [1/3, 2/3, 1],
-    ]])
-
-    menPreferences = np.argsort(-P, axis=2)
-    womenPreferences = np.argsort(-np.swapaxes(Q, 1, 2), axis=2)
-    order = [1,0,2,3,5,4]
-
-    return P, Q, menPreferences, womenPreferences, order
+import itertools
 
 @jit(nopython=True)
 def numba_DA(P, Q, menPreferences, womenPreferences):
@@ -111,6 +92,75 @@ def numba_SD(P,Q, menPreferences, womenPreferences, order):
                 if womanSpouse[she] == -1:
                     womanSpouse[she] = num_agents
     return R
+
+@jit(nopython=True)
+def numba_RSD(P,Q,menPreferences, womenPreferences, orders):
+
+    num_instances, num_agents = P.shape[0], P.shape[1]
+    R = np.zeros(P.shape)
+    all_agents = 2*num_agents
+
+    for inst in range(num_instances):
+        for order in orders:
+            manSpouse, womanSpouse = [-1] * num_agents, [-1] * num_agents
+            for n in order:
+                if n < num_agents:
+                    he = n
+                    if manSpouse[he] != -1:
+                        continue
+
+                    for she in menPreferences[inst, he]:
+                        if P[inst, he, she] < 0:
+                            break
+
+                        if womanSpouse[she] == -1:
+                            manSpouse[he], womanSpouse[she] = she, he
+                            R[inst, he, she] += 1
+                            break
+                    if manSpouse[he] == -1:
+                        manSpouse[he] = num_agents
+                else:
+                    she = n - num_agents
+
+                    if womanSpouse[she] != -1:
+                        continue
+
+                    for he in womenPreferences[inst, :, she]:
+
+                        if Q[inst, he, she] < 0:
+                            break
+
+                        if manSpouse[he] == -1:
+                            manSpouse[he], womanSpouse[she] = she, he
+                            R[inst, he, she] += 1
+                            break
+                    if womanSpouse[she] == -1:
+                        womanSpouse[she] = num_agents
+
+    return R/orders.shape[0]
+
+
+
+
+@jit(nopython=True)
+def numba_one_RSD(P, Q, menPreferences, womenPreferences, orders):
+    num_instances, num_agents = P.shape[0], P.shape[1]
+    R = np.zeros(P.shape)
+
+    for inst in range(num_instances):
+        for order in orders:
+            womanSpouse = [-1] * num_agents
+            for he in order:
+
+                for she in menPreferences[inst,he]:
+
+                    if P[inst, he, she] < 0:
+                        break
+                    if womanSpouse[she] == -1:
+                        womanSpouse[she] = he
+                        R[inst, he, she] += 1
+                        break
+    return R/orders.shape[0]
 
 @jit(nopython=True)
 def numba_TTC(P, Q, menPreferences, womenPreferences):
@@ -220,30 +270,56 @@ def numba_BSC(P, Q, menPreferences, womenPreferences):
     return R
 
 
+#Worker proposing calling fcts
 
-if __name__ == "__main__":
-    P, Q, menPreferences, womenPreferences, order = example_market()
-    R = numba_DA(P, Q, menPreferences, womenPreferences)
-    R2 = numba_SD(P, Q, menPreferences, womenPreferences, order)
-    R3 = numba_TTC(P, Q, menPreferences, womenPreferences)
-    R4 = numba_BSC(P, Q, menPreferences, womenPreferences)
-    expected_R = np.array([[
-        [0, 0, 1],
-        [0, 1, 0],
-        [1, 0, 0],
-    ]])
+def compute_RSD_batch(P, Q):
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    orders = np.array(list(itertools.permutations(list(range(2 * P.shape[1])))))
+    return numba_RSD(P, Q, menPreferences, womenPreferences, orders)
 
-    print("menPreferences:")
-    print(menPreferences)
-    print("womenPreferences:")
-    print(womenPreferences)
-    print("R(DA):")
-    print(R.astype(int))
-    print("R2(SD):")
-    print(R2.astype(int))
-    print("R3(TTC):")
-    print(R3.astype(int))
-    print(f"R4(BSC):\n{R4.astype(int)}")
-    print("expected R:")
-    print(expected_R)
-    print("matches expected:", np.array_equal(R, expected_R))
+def compute_one_RSD_batch(P, Q):
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    orders = np.array(list(itertools.permutations(list(range(P.shape[1])))))
+    return numba_RSD(P, Q, menPreferences, womenPreferences, orders)
+
+def compute_TTC_batch(P, Q):
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_TTC(P, Q, menPreferences, womenPreferences)
+
+def compute_DA_batch(P, Q):
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_DA(P, Q, menPreferences, womenPreferences)
+
+def compute_BSC_batch(P, Q):
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_BSC(P, Q, menPreferences, womenPreferences)
+
+def compute_one_RSD_batch_switch(P, Q):
+    P, Q = Q.transpose((0, 2, 1)), P.transpose((0, 2, 1))
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    orders = np.array(list(itertools.permutations(list(range(P.shape[1])))))
+    return numba_RSD(P, Q, menPreferences, womenPreferences, orders).transpose(0, 2, 1)
+
+def compute_TTC_batch_switch(P, Q):
+    P, Q = Q.transpose((0, 2, 1)), P.transpose((0, 2, 1))
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_TTC(P, Q, menPreferences, womenPreferences).transpose(0, 2, 1)
+
+def compute_DA_batch_switch(P, Q):
+    P, Q = Q.transpose((0, 2, 1)), P.transpose((0, 2, 1))
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_DA(P, Q, menPreferences, womenPreferences).transpose(0, 2, 1)
+
+def compute_BSC_batch_switch(P, Q):
+    P, Q = Q.transpose((0, 2, 1)), P.transpose((0, 2, 1))
+    menPreferences = np.argsort(-P, axis = -1)
+    womenPreferences = np.argsort(-Q, axis = -2)
+    return numba_BSC(P, Q, menPreferences, womenPreferences).transpose(0, 2, 1)
