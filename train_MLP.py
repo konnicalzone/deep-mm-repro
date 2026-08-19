@@ -13,12 +13,18 @@ import torch.nn.functional as F
 from utils import init_logger
 from MLP import Net
 
-from data import Data
+from data_many_to_one import Data
 
 device = "cuda"
 
 class Args:
-    num_agents: int = 0
+    n_students: int = 0
+
+    n_schools: int = 0
+
+    min_capacity: int = 0
+
+    max_capacity: int = 0
 
     prob: float = 0.0
 
@@ -57,41 +63,37 @@ class Args:
 def torch_var(x):
     return torch.Tensor(x).to(device)
 
-def compute_st(r, p, q):
-    num_agents = r.size(1)
+def compute_st(r, p, q, capacity):
+    n_students = r.size(1)
     wp = F.relu(p[:,:,None,:]- p[:,:,:,None])
     wq = F.relu(q[:,:,None,:]- q[:,None,:,:])
-    t = (1-torch.sum(r, dim = 1, keepdim = True))
+    t = (capacity[:,None,:] - torch.sum(r, dim=1, keepdim=True))
     s = (1- torch.sum(r, dim= 2, keepdim = True))
 
     rgt_1 = torch.einsum('bjc,bijc->bic', r, wq) + t * F.relu(q)
-    rgt_2 = torch.einsum('bia,biac->bic', r, wp) + t * F.relu(p)
+    rgt_2 = torch.einsum('bia,biac->bic', r, wp) + s * F.relu(p)
 
     regret = rgt_1 * rgt_2
-    return regret.sum(-1).sum(-1).mean()/num_agents
+    return regret.sum(-1).sum(-1).mean()/n_students
 
 def compute_ir(r, p, q):
-    num_agents = r.size(1)
+    n_students = r.size(1)
     ir_1 = r * F.relu(-q)
     ir_2 = r * F.relu(-p)
     ir = ir_1 + ir_2
-    return ir.sum(-1).sum(-1).mean()/num_agents
+    return ir.sum(-1).sum(-1).mean()/n_students
 
 
-def compute_ic_single(r, p, q, P, Q, agent_idx, is_P):
-    num_agents = r.size(1)
-    P_mis, Q_mis = G.generate_complete_misreports(P, Q, agent_idx, is_P)
-    p_mis, q_mis = torch_var(P_mis), torch_var(Q_mis)
-    r_mis = model(p_mis.view(-1, num_agents, num_agents), q_mis.view(-1, num_agents, num_agents))
+def compute_ic_single(r, p, q, P, Q, C, student_idx):
+    n_students = r.size(1)
+    n_schools = r.size(2)
+    P_mis, Q_mis , C_mis = G.generate_complete_misreports(P, Q, C, student_idx)
+    p_mis, q_mis , capacity_mis = torch_var(P_mis), torch_var(Q_mis), torch_var(C_mis)
+    r_mis = model(p_mis.view(-1, n_students, n_schools), q_mis.view(-1, n_students, n_schools), capacity_mis.view(-1, n_schools))
     r_mis = r_mis.view(*P_mis.shape)
 
-    if is_P:
-        r_diff = (r_mis[:, :, agent_idx, :] - r[:, None, agent_idx, :]) * (p[:, None, agent_idx, :] > 0).to(p.dtype)
-        _, idx = torch.sort(-p[:, agent_idx, :])
-
-    else:
-        r_diff = (r_mis[:, :, :, agent_idx] - r[:, None, :, agent_idx]) * (q[:, None, :, agent_idx] > 0).to(q.dtype)
-        _, idx = torch.sort(-q[:, :, agent_idx])
+    r_diff = (r_mis[:, :, student_idx, :] - r[:, None, student_idx, :]) * (p[:, None, student_idx, :] > 0).to(p.dtype)
+    _, idx = torch.sort(-p[:, student_idx, :])
 
     idx = idx[:, None, :].repeat(1, r_mis.size(1), 1)
     fosd_viol = torch.cumsum(torch.gather(r_diff, -1, idx), -1)
@@ -102,16 +104,15 @@ def compute_ic_single(r, p, q, P, Q, agent_idx, is_P):
 """ IC Violation """
 
 
-def compute_ic(r, p, q, P, Q):
-    num_agents = r.size(1)
-    IC_viol_P = torch.zeros(num_agents).to(device)
-    IC_viol_Q = torch.zeros(num_agents).to(device)
+def compute_ic(r, p, q, P, Q, C):
+    n_students = r.size(1)
+    IC_viol_P = torch.zeros(n_students).to(device)
 
-    for agent_idx in range(num_agents):
-        IC_viol_P[agent_idx] = compute_ic_single(r, p, q, P, Q, agent_idx, is_P=True)
-        IC_viol_Q[agent_idx] = compute_ic_single(r, p, q, P, Q, agent_idx, is_P=False)
+    for student_idx in range(n_students):
+        IC_viol_P[student_idx] = compute_ic_single(r, p, q, P, Q, C, student_idx)
 
-    IC_viol = (IC_viol_P.mean() + IC_viol_Q.mean()) / 2
+    IC_viol = IC_viol_P.mean()
+
     return IC_viol
 
 
@@ -122,11 +123,11 @@ def evaluate(model, G, batch_size, num_samples):
         val_st_loss = 0.0
         val_ic_loss = 0.0
         for j in range(num_batches):
-            P, Q = G.generate_batch(args.batch_size)
-            p, q = torch_var(P), torch_var(Q)
-            r = model(p, q)
-            st_loss = compute_st(r, p, q)
-            ic_loss = compute_ic(r, p, q, P, Q)
+            P, Q , C = G.generate_batch(args.batch_size)
+            p, q, capacity = torch_var(P), torch_var(Q), torch_var(C)
+            r = model(p, q, capacity)
+            st_loss = compute_st(r, p, q, capacity)
+            ic_loss = compute_ic(r, p, q, P, Q, C)
             val_st_loss += st_loss.item() / num_batches
             val_ic_loss += ic_loss.item() / num_batches
     return val_st_loss, val_ic_loss
@@ -135,9 +136,21 @@ def evaluate(model, G, batch_size, num_samples):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-n', '--num_agents', action='store',
-                        dest='num_agents', required=True, type=int,
-                        help='Num Agents')
+    parser.add_argument('-nst', '--n_students', action='store',
+                        dest='n_students', required=True, type=int,
+                        help='n students')
+
+    parser.add_argument('-nsc', '--n_schools', action='store',
+                        dest='n_schools', required=True, type=int,
+                        help='n schools')
+
+    parser.add_argument('-minc', '--min_capacity', action='store',
+                        dest='min_capacity', required=True, type=int,
+                        help='min capacity')
+
+    parser.add_argument('-maxc', '--max_capacity', action='store',
+                        dest='max_capacity', required=True, type=int,
+                        help='max capacity')
 
     parser.add_argument('-p', '--prob', action='store',
                         dest='prob', required=True, type=float,
@@ -158,14 +171,22 @@ if __name__ == "__main__":
     cmd_args = parser.parse_args()
 
     args = Args()
-    args.num_agents = cmd_args.num_agents
+    args.n_students = cmd_args.n_students
+    args.n_schools = cmd_args.n_schools
+    args.min_capacity = cmd_args.min_capacity
+    args.max_capacity = cmd_args.max_capacity
     args.prob = cmd_args.prob
     args.corr = cmd_args.corr
     args.lambd = cmd_args.lambd
     args.resume = (cmd_args.resume == 1)
 
     """ Loggers """
-    root_dir = os.path.join("experiments", "agents_%d" % (args.num_agents), "corr_%.2f" % (args.corr), "MLP")
+    root_dir = os.path.join("experiments",
+                            f"students_{args.n_students}",
+                            f"schools_{args.n_schools}",
+                            f"capacity_{args.min_capacity}_{args.max_capacity}",
+                            f"corr_{args.corr:.2f}",
+                            "MLP")
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
 
@@ -183,8 +204,8 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
 
-    G = Data(args.num_agents, args.prob, args.corr)
-    model = Net(args.net_arch, args.act_fn, args.num_agents).to(device)
+    G = Data(args.n_students, args.n_schools, args.min_capacity, args.max_capacity, args.prob, args.corr)
+    model = Net(args.net_arch, args.act_fn, args.n_students, args.n_schools).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[10000, 25000], gamma=0.5)
@@ -209,15 +230,15 @@ if __name__ == "__main__":
 
         # Inference
         for _ in range(args.num_accums):
-            P, Q = G.generate_batch(args.batch_size)
-            p, q = torch_var(P), torch_var(Q)
-            r = model(p, q)
+            P, Q , C= G.generate_batch(args.batch_size)
+            p, q , capacity = torch_var(P), torch_var(Q), torch_var(C)
+            r = model(p, q, capacity)
 
             # Compute loss
-            st_loss = compute_st(r, p, q)
+            st_loss = compute_st(r, p, q, capacity)
 
             if args.lambd < 1.0:
-                ic_loss = compute_ic(r, p, q, P, Q)
+                ic_loss = compute_ic(r, p, q, P, Q, C)
             else:
                 ic_loss = torch.tensor(0.0, device=device)
 
