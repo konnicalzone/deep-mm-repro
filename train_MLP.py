@@ -15,7 +15,7 @@ from MLP import Net
 
 from data_many_to_one import Data
 
-device = "cuda"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class Args:
     n_students: int = 0
@@ -44,7 +44,7 @@ class Args:
 
     num_accums: int = 1
 
-    learning_rate: float = 5e-3
+    learning_rate: float = 0.05
 
     max_iteration: int = 1000
 
@@ -67,14 +67,20 @@ def compute_st(r, p, q, capacity):
     n_students = r.size(1)
     wp = F.relu(p[:,:,None,:]- p[:,:,:,None])
     wq = F.relu(q[:,:,None,:]- q[:,None,:,:])
-    t = (capacity[:,None,:] - torch.sum(r, dim=1, keepdim=True))
-    s = (1- torch.sum(r, dim= 2, keepdim = True))
+    t = F.relu(capacity[:,None,:] - torch.sum(r, dim=1, keepdim=True))
 
     rgt_1 = torch.einsum('bjc,bijc->bic', r, wq) + t * F.relu(q)
-    rgt_2 = torch.einsum('bia,biac->bic', r, wp) + s * F.relu(p)
+    rgt_2 = torch.einsum('bia,biac->bic', r, wp) * F.relu(p)
 
     regret = rgt_1 * rgt_2
     return regret.sum(-1).sum(-1).mean()/n_students
+
+def compute_unmatched_loss(r):
+    # Sum the probabilities for each student across all schools
+    student_totals = torch.sum(r, dim=2)
+    # Penalize if the sum is less than 1.0
+    unmatched_penalty = F.relu(1.0 - student_totals)
+    return unmatched_penalty.mean()
 
 def compute_ir(r, p, q):
     n_students = r.size(1)
@@ -168,6 +174,34 @@ if __name__ == "__main__":
                         dest='resume', default=0, type=int,
                         help='Resume Training')
 
+    parser.add_argument('--batch_size', action='store',
+                        dest='batch_size', default=Args.batch_size, type=int,
+                        help='Batch Size')
+
+    parser.add_argument('--max_iteration', action='store',
+                        dest='max_iteration', default=Args.max_iteration, type=int,
+                        help='Max Iteration')
+
+    parser.add_argument('--print_iter', action='store',
+                        dest='print_iter', default=Args.print_iter, type=int,
+                        help='Print Iteration')
+
+    parser.add_argument('--val_iter', action='store',
+                        dest='val_iter', default=Args.val_iter, type=int,
+                        help='Validation Iteration')
+
+    parser.add_argument('--save_iter', action='store',
+                        dest='save_iter', default=Args.save_iter, type=int,
+                        help='Save Iteration')
+
+    parser.add_argument('--num_val_samples', action='store',
+                        dest='num_val_samples', default=Args.num_val_samples, type=int,
+                        help='Number of Validation Samples')
+
+    parser.add_argument('--num_tst_samples', action='store',
+                        dest='num_tst_samples', default=Args.num_tst_samples, type=int,
+                        help='Number of Test Samples')
+
     cmd_args = parser.parse_args()
 
     args = Args()
@@ -179,6 +213,13 @@ if __name__ == "__main__":
     args.corr = cmd_args.corr
     args.lambd = cmd_args.lambd
     args.resume = (cmd_args.resume == 1)
+    args.batch_size = cmd_args.batch_size
+    args.max_iteration = cmd_args.max_iteration
+    args.print_iter = cmd_args.print_iter
+    args.val_iter = cmd_args.val_iter
+    args.save_iter = cmd_args.save_iter
+    args.num_val_samples = cmd_args.num_val_samples
+    args.num_tst_samples = cmd_args.num_tst_samples
 
     """ Loggers """
     root_dir = os.path.join("experiments",
@@ -208,7 +249,7 @@ if __name__ == "__main__":
     model = Net(args.net_arch, args.act_fn, args.n_students, args.n_schools).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[10000, 25000], gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[10, 25], gamma=0.5)
 
     iteration = 0
 
@@ -234,15 +275,18 @@ if __name__ == "__main__":
             p, q , capacity = torch_var(P), torch_var(Q), torch_var(C)
             r = model(p, q, capacity)
 
+            if iteration % args.print_iter == 0:
+                print(f"\n[DEBUG] Max enrollment at any school: {torch.sum(r, dim=1).max().item():.4f}")
+
             # Compute loss
             st_loss = compute_st(r, p, q, capacity)
-
+            unmatched_loss = compute_unmatched_loss(r)
             if args.lambd < 1.0:
                 ic_loss = compute_ic(r, p, q, P, Q, C)
             else:
                 ic_loss = torch.tensor(0.0, device=device)
 
-            total_loss = (st_loss * args.lambd + ic_loss * (1 - args.lambd)) / args.num_accums
+            total_loss = (st_loss * args.lambd + ic_loss * (1 - args.lambd) + unmatched_loss*20) / args.num_accums
             total_loss.backward()
 
         opt.step()

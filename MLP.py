@@ -13,10 +13,11 @@ class DenseBlock(nn.Module):
         return y
 
 class OutputBlock(nn.Module):
-    def __init__(self, latent_dim, n_students, n_schools):
+    def __init__(self, latent_dim, n_students, n_schools, temperature = 0.2):
         super().__init__()
         self.n_students = n_students
         self.n_schools = n_schools
+        self.temperature = temperature
         self.fc_r = nn.Linear(latent_dim, (self.n_students +1) * self.n_schools)
         self.fc_c = nn.Linear(latent_dim, self.n_students * (self.n_schools +1))
 
@@ -24,11 +25,11 @@ class OutputBlock(nn.Module):
         row = self.fc_r(x).view(-1, self.n_students + 1, self.n_schools)
         col = self.fc_c(x).view(-1, self.n_students, self.n_schools +1)
 
-        row = F.softplus(row) * mask_p
-        col = F.softplus(col) * mask_q
+        row = F.softplus(row /self.temperature) * mask_p
+        col = F.softplus(col/self.temperature) * mask_q
 
         row = F.normalize(row, p=1, dim=1, eps=1e-8)[:,:-1,:]
-        col = F.normalize(col, p=1, dim=1, eps=1e-8)[:,:,:-1]
+        col = F.normalize(col, p=1, dim=2, eps=1e-8)[:,:,:-1]
 
         capacity = capacity[:, None, :]
         row *= capacity
