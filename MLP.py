@@ -13,15 +13,16 @@ class DenseBlock(nn.Module):
         return y
 
 class OutputBlock(nn.Module):
-    def __init__(self, latent_dim, num_agents):
+    def __init__(self, latent_dim, n_students, n_schools):
         super().__init__()
-        self.num_agents = num_agents
-        self.fc_r = nn.Linear(latent_dim, (self.num_agents +1) * self.num_agents)
-        self.fc_c = nn.Linear(latent_dim, self.num_agents * (self.num_agents +1))
+        self.n_students = n_students
+        self.n_schools = n_schools
+        self.fc_r = nn.Linear(latent_dim, (self.n_students +1) * self.n_schools)
+        self.fc_c = nn.Linear(latent_dim, self.n_students * (self.n_schools +1))
 
-    def forward(self, x, mask_p, mask_q):
-        row = self.fc_r(x).view(-1, self.num_agents + 1, self.num_agents)
-        col = self.fc_c(x).view(-1, self.num_agents, self.num_agents +1)
+    def forward(self, x, mask_p, mask_q, capacity):
+        row = self.fc_r(x).view(-1, self.n_students + 1, self.n_schools)
+        col = self.fc_c(x).view(-1, self.n_students, self.n_schools +1)
 
         row = F.softplus(row) * mask_p
         col = F.softplus(col) * mask_q
@@ -29,32 +30,36 @@ class OutputBlock(nn.Module):
         row = F.normalize(row, p=1, dim=1, eps=1e-8)[:,:-1,:]
         col = F.normalize(col, p=1, dim=1, eps=1e-8)[:,:,:-1]
 
+        capacity = capacity[:, None, :]
+        row *= capacity
+
         return torch.minimum(row,col)
 
 
 class Net(nn.Module):
-    def __init__(self, net_arch, act_fn, num_agents):
+    def __init__(self, net_arch, act_fn, n_students, n_schools):
         super().__init__()
 # net_arch is number representing size of each hidden layer
 
         blocks = []
-        self.num_agents = num_agents
-        last_layer_dim = 2 * (self.num_agents**2)
+        self.n_students = n_students
+        self.n_schools = n_schools
+        last_layer_dim = 2 * (self.n_students * self.n_schools)
 
         for curr_layer_dim in net_arch:
             blocks.append(DenseBlock(last_layer_dim, curr_layer_dim, act_fn))
             last_layer_dim = curr_layer_dim
 
         self.network = nn.Sequential(*blocks)
-        self.output = OutputBlock(last_layer_dim, self.num_agents)
+        self.output = OutputBlock(last_layer_dim, self.n_students, self.n_schools)
 
-    def forward(self, p, q):
+    def forward(self, p, q, capacity):
         p = torch.relu(p)
         q = torch.relu(q)
         mask_p = torch.nn.functional.pad((p>0).to(p.dtype), (0,0,0,1,0,0), mode = 'constant', value = 1)
         mask_q = torch.nn.functional.pad((q>0).to(q.dtype), (0,1,0,0,0,0), mode = 'constant', value = 1)
 
-        x = torch.stack([p,q],dim=1).view(-1, 2 * (self.num_agents**2))
+        x = torch.stack([p,q],dim=1).view(-1, 2 * (self.n_students * self.n_schools))
         x = self.network(x)
-        return self.output(x, mask_p, mask_q)
+        return self.output(x, mask_p, mask_q, capacity)
 
